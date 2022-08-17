@@ -186,12 +186,12 @@ class ScmAPI(object):
         :return: str - 文件内容
         """
         scm_client = scm_info['scm_client']
-        file_content = scm_client.cat_file(path, revision)
+        file_content = scm_client.cat_file(path, revision).encode("UTF-8", "ignore").decode("UTF-8")
         return re.sub("[\x00-\x08\x0b-\x0c\x0e-\x1f]", "", file_content)
 
     @ScmInit()
     def get_revision_time(self, scm_info, revision):
-        """取指定版本的创建时间 -- 支持 Git OA接口
+        """取指定版本的创建时间
 
         :param scm_info: scm信息，包括scm_client, scm_url, username, password
         :param revision: 文件版本
@@ -202,7 +202,7 @@ class ScmAPI(object):
 
     @ScmInit()
     def revision_lt(self, scm_info, start_revision, end_revision):
-        """比较版本大小 -- 支持 Git OA接口
+        """比较版本大小
 
         :param scm_info: scm信息，包括scm_client, scm_url, username, password
         :param start_revision: 起始版本
