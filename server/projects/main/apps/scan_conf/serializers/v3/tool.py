@@ -78,6 +78,24 @@ class CheckToolEditSeriaizer(CheckToolSerializer):
         if self.context.get("is_local_script", False) and self.context.get("user"):
             user = self.context.get("user")
         return user
+    
+    def is_source_scm_auth(self, scm_auth):
+        """校验当前实例凭证是否是原配置凭证"""
+        if self.instance and self.instance.scm_auth:
+            auth_type = scm_auth.get("auth_type")
+            scm_oauth = scm_auth.get("scm_oauth")
+            scm_account = scm_auth.get("scm_account")
+            scm_ssh = scm_auth.get("scm_ssh")
+            if auth_type == models.ScmAuth.ScmAuthTypeEnum.OAUTH and \
+               self.instance.scm_auth.scm_oauth == scm_oauth:
+                return scm_auth.credential_info
+            elif auth_type == models.ScmAuth.ScmAuthTypeEnum.PASSWORD and \
+                 self.instance.scm_auth.scm_account == scm_account:
+                return scm_account.credential_info
+            elif auth_type == models.ScmAuth.ScmAuthTypeEnum.SSHTOKEN and \
+                 self.instance.scm_auth.scm_ssh == scm_ssh:
+                return scm_ssh.credential_info
+        return False
 
     def validate(self, attrs):
         attrs["org"] = get_and_check_view_org(self)
@@ -95,7 +113,10 @@ class CheckToolEditSeriaizer(CheckToolSerializer):
         if scm_url and scm_auth:
             scm_type = attrs.get("scm_type")
             auth_type = scm_auth.get("auth_type")
-            if auth_type == models.ScmAuth.ScmAuthTypeEnum.OAUTH:
+            credential_info = self.is_source_scm_auth(scm_auth)
+            if credential_info:
+                pass
+            elif auth_type == models.ScmAuth.ScmAuthTypeEnum.OAUTH:
                 scm_oauth = scm_auth.get("scm_oauth")
                 if not scm_oauth or scm_oauth.user != user:
                     raise serializers.ValidationError({"scm_auth": "请选择有效OAuth凭证"})
@@ -129,6 +150,10 @@ class CheckToolEditSeriaizer(CheckToolSerializer):
                 scm_ssh_info=scm_auth.get("scm_ssh"),
                 scm_oauth=scm_auth.get("scm_oauth"),
             )
+        elif instance:
+            # 更新时允许移除scm_auth
+            checktool.scm_auth = None
+            checktool.save(user=user)
         return checktool
 
     def create(self, validated_data):

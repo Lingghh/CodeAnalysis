@@ -94,7 +94,7 @@ class ToolLibLoadManager(object):
                         break
                     toollib_json = toollib_json_list[i_idx+j_idx]
                     logger.info('--> [%s/%s], toollib name: %s' % (
-                        toollib_count, index+1, toollib_json["name"]))
+                        index+1, toollib_count, toollib_json["name"]))
                     task = t_thread.submit(cls.loadlib, toollib_json, user)
                     all_task.append(task)
                 for future in as_completed(all_task):
@@ -169,7 +169,7 @@ class CheckToolLoadManager(object):
                         break
                     checktool_json = checktool_json_list[i_idx+j_idx]
                     logger.info('--> [%s/%s], checktool name: %s' % (
-                        checktool_count, index+1, checktool_json["name"]))
+                        index+1, checktool_count, checktool_json["name"]))
                     task = t_thread.submit(cls.loadchecker, checktool_json, admins)
                     all_task.append(task)
                 for future in as_completed(all_task):

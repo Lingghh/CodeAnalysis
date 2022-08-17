@@ -23,7 +23,7 @@ from rest_framework import serializers
 
 # 项目内 import
 from apps.codeproj.models import CodeLintInfo, CodeMetricCCInfo, CodeMetricClocInfo, \
-    CodeMetricDupInfo, Project, Repository
+    CodeMetricDupInfo, Project, Repository, ProjectTeam, Organization
 from apps.job import models
 from apps.nodemgr.models import Node, NodeToolProcessRelation
 from util import errcode
@@ -49,6 +49,27 @@ class JobDispatchHandler(object):
             return False
 
     @classmethod
+    def get_enable_nodes(cls, job, tag):
+        """获取可执行的节点列表
+        """
+        project = job.project
+        repo = project.repo
+        team = repo.project_team
+        org = repo.organization
+
+        superusers = User.objects.filter(is_superuser=True)
+        users = [user for user in repo.get_members(Repository.PermissionEnum.ADMIN)] + \
+                [user for user in repo.get_members(Repository.PermissionEnum.USER)] + \
+                [user for user in superusers]
+        if team:
+            users += [user for user in team.get_members(ProjectTeam.PermissionEnum.ADMIN)]
+        if org:
+            users += [user for user in org.get_members(Organization.PermissionEnum.ADMIN)]
+        users = set(users)
+        nodes = Node.objects.filter(manager__in=users, exec_tags=tag)
+        return nodes
+
+    @classmethod
     def add_job_to_queue(cls, job):
         """根据分配规则，将job下相关的task和task_process分配到相应的node节点去：
            标签对应：任务的标签继承自项目标签，标签需要一一对应
@@ -66,17 +87,9 @@ class JobDispatchHandler(object):
             return
         
         logger.info("[Job: %s] start to add job to queue..." % job)
-        project = job.project
-        repo = project.repo
-
-        superusers = User.objects.filter(is_superuser=True)
-        users = set([user for user in repo.get_members(Repository.PermissionEnum.ADMIN)] +
-                    [user for user in repo.get_members(Repository.PermissionEnum.USER)] +
-                    [user for user in superusers])
-
         # 1. Node管理员需要对Project有访问权限
         # 2. 标签对应
-        nodes = Node.objects.filter(manager__in=users, exec_tags=tag)
+        nodes = cls.get_enable_nodes(job, tag)
         if not nodes:
             logger.warning("找不到符合运行环境标签[%s]且有权限的节点分配" % tag.name if tag else "None")
         queue_set = []
@@ -163,7 +176,7 @@ class JobCloseHandler(object):
             logger.exception("[Job: %s] 更新扫描任务状态失败: %s" % (job_id, err))
             return
         models.Job.objects.filter(id=job_id).update(
-            state=models.Job.StateEnum.RUNNING, result_code=None)
+            state=models.Job.StateEnum.CLOSING, result_code=None, closing_time=timezone.now())
         cls.close_scan(job_id, reset=True)
 
     @classmethod
@@ -359,14 +372,17 @@ class JobCloseHandler(object):
         logger.info("[Job: %d] checking older job unclosed..." % job_id)
         try:
             older_jobs = models.Job.objects.filter(
-                project=job.project, id__lt=job.id).exclude(state=models.Job.StateEnum.CLOSED)
+                project=job.project, id__lt=job.id
+            ).exclude(
+                state=models.Job.StateEnum.CLOSED
+            )
             if older_jobs:
-                logger.info("[Job: %d] canceling %d older scan jobs..." %
-                            (job_id, older_jobs.count()))
+                logger.info("[Job: %d] canceling %d older scan jobs..." % (job_id, older_jobs.count()))
                 try:
                     for j in older_jobs:
-                        logger.info(
-                            "[Job: %d] canceling older job[%d]..." % (job_id, j.id))
+                        if not j.check_redirect():
+                            continue
+                        logger.info("[Job: %d] canceling older job[%d]..." % (job_id, j.id))
                         result_msg = json.dumps(
                             {"job_id": job.id, "scan_id": scan_id, "msg": "plz check the other job's result"})
                         JobCloseHandler.revoke_job(j, errcode.CLIENT_REDIRECT, result_msg)
@@ -436,12 +452,21 @@ class JobCloseHandler(object):
             logger.info("[Task: %s] 进程[%s]关闭数量: %s" % (task_id, processes, nrow))
             if nrow == 0:
                 return
+
             tp_relations = models.TaskProcessRelation.objects.filter(task_id=task_id)
-            if tp_relations.filter(state=models.TaskProcessRelation.StateEnum.RUNNING):
+            running_processes = tp_relations.filter(state=models.TaskProcessRelation.StateEnum.RUNNING)
+            waiting_processes = tp_relations.exclude(state=models.TaskProcessRelation.StateEnum.CLOSED)
+            if running_processes.count() > 0 and nrow != tp_relations.count():
+                logger.info("[Task: %s] 当前还有%s个进程正在运行: %s" % (
+                    task_id, running_processes.count(), running_processes.values_list("process__name", flat=True)))
                 task_state = models.Task.StateEnum.RUNNING
-            elif tp_relations.exclude(state=models.TaskProcessRelation.StateEnum.CLOSED):
+            elif waiting_processes.count() > 0 and nrow != tp_relations.count():
+                logger.info("[Task: %s] 当前还有%s个进程处于等待状态: %s" % (
+                    task_id, waiting_processes.count(), waiting_processes.values_list("process__name", flat=True)))
                 task_state = models.Task.StateEnum.WAITING
             else:
+                logger.info("[Task: %s] 当前%s个进程全部关闭: %s" % (
+                    task_id, tp_relations.count(), tp_relations.values_list("process__name", flat=True)))
                 task_state = models.Task.StateEnum.CLOSED
             nrow = models.Task.objects.filter(
                 id=task_id,
@@ -497,6 +522,25 @@ class JobCloseHandler(object):
                         executor_used_num=F('executor_used_num') - 1)
                     Node.objects.filter(id=task.node.id, state=Node.StateEnum.BUSY).update(
                         state=Node.StateEnum.FREE)
+
+    @classmethod
+    def check_closing_job(cls, job):
+        """检查正在入库的任务
+        """
+        if not models.Job.objects.filter(id=job.id, state=models.Job.StateEnum.CLOSING).exists():
+            return True
+        try:
+            response = AnalyseClient().api("scan_check", path_params=(job.project_id, job.scan_id,), data=None)
+        except Exception as err:
+            logger.exception("[Project: %s][Job: %s] scan check error, err: %s" % (job.project_id, job.id, err))
+            return True
+        if response.get("result") is True:
+            return True
+        logger.warning("[Project: %s][Job: %s] job closing check failed, reset job closing..." % (
+            job.project_id, job.id))
+        # cls.reclose_job(job.id)
+        return False
+
 
 
 class NodeTaskRegisterManager(object):
