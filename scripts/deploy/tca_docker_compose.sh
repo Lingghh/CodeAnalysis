@@ -149,12 +149,16 @@ function deploy_all_services() {
     tca_introduction
 }
 
+function build_all_image() {
+    docker-compose build main-server analysis-server file-server login-server scmproxy client
+}
 
 function tca_docker_compose_main() {
     command=$1
     case $command in
         deploy)
             LOG_INFO "Deploy tca docker-compose"
+            build_all_image
             deploy_all_services
         ;;
         start)
@@ -167,7 +171,7 @@ function tca_docker_compose_main() {
         ;;
         build)
             LOG_INFO "Build tca image"
-            docker-compose build main-server analysis-server file-server login-server scmproxy client
+            build_all_image
         ;;
         *)
             LOG_ERROR "'$command' not support."
